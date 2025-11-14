@@ -1,0 +1,11 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python app.py"
+
+[variables]
+ZENDESK_SUBDOMAIN = "yourcompany"
+ZENDESK_EMAIL = "your_email@company.com"
+ZENDESK_API_TOKEN = "your_actual_zendesk_token"
+DISCORD_WEBHOOK_URL = "your_actual_discord_webhook_url"
