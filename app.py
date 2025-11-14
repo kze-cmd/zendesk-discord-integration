@@ -165,60 +165,180 @@ def create_ticket():
             "message": str(e)
         }), 500
 
-@app.route('/zendesk-webhook', methods=['POST'])
+@app.route('/zendesk-webhook', methods=['POST', 'GET'])
 def zendesk_webhook():
-    """Zendesk webhook endpoint"""
+    """Zendesk webhook endpoint with full debugging"""
+    print("=" * 60)
+    print("🎯 MAIN ZENDESK WEBHOOK ENDPOINT HIT!")
+    print("=" * 60)
+    
+    if request.method == 'GET':
+        return jsonify({
+            "status": "ready",
+            "message": "Zendesk webhook endpoint is active",
+            "endpoint": "/zendesk-webhook"
+        })
+    
+    # Handle POST requests
+    print("📨 MAIN: Webhook received via POST!")
+    print("📨 MAIN: Headers:", dict(request.headers))
+    print("📨 MAIN: Content-Type:", request.content_type)
+    print("📨 MAIN: Method:", request.method)
+    
     try:
-        data = request.get_json() or {}
+        # Try to get JSON data
+        if request.is_json:
+            data = request.get_json()
+            print("📨 MAIN: JSON data received:")
+            print(json.dumps(data, indent=2))
+        else:
+            # Try to force JSON parsing
+            try:
+                data = request.get_json(force=True, silent=True)
+                if data:
+                    print("📨 MAIN: Forced JSON parsing worked:")
+                    print(json.dumps(data, indent=2))
+                else:
+                    raw_data = request.get_data(as_text=True)
+                    print("📨 MAIN: Raw data (not JSON):", raw_data)
+                    data = {"raw_data": raw_data}
+            except Exception as e:
+                raw_data = request.get_data(as_text=True)
+                print("📨 MAIN: Raw data (parse error):", raw_data)
+                data = {"raw_data": raw_data, "error": str(e)}
         
+        # Check Discord configuration
         if 'YOUR_ACTUAL' in CONFIG['DISCORD_WEBHOOK_URL']:
-            return jsonify({"status": "error", "message": "Discord not configured"}), 500
+            print("❌ MAIN: Discord webhook not configured in app.py")
+            return jsonify({
+                "status": "error", 
+                "message": "Discord webhook URL not configured. Update CONFIG in app.py"
+            }), 500
         
-        ticket_id = data.get('ticket', {}).get('id')
-        comment = data.get('ticket', {}).get('comment', {})
+        print("🔧 MAIN: Discord webhook is configured")
         
-        if ticket_id and comment:
-            body = comment.get('body', '')
-            author = comment.get('author', {}).get('name', 'Support')
-            
-            if body and "discord-" not in author.lower():
-                discord_data = {
-                    "embeds": [{
-                        "title": f"💬 Ticket #{ticket_id} Update",
-                        "description": f"**From {author}:**\n{body}",
-                        "color": 3447003,
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
-                    }]
+        # Try to extract ticket and comment data
+        ticket_id = None
+        comment_body = None
+        author_name = "Support Agent"
+        
+        # Method 1: Standard Zendesk structure
+        if isinstance(data, dict) and 'ticket' in data:
+            ticket = data['ticket']
+            ticket_id = ticket.get('id')
+            comment = ticket.get('comment', {})
+            comment_body = comment.get('body') or comment.get('value')
+            author_info = comment.get('author', {})
+            author_name = author_info.get('name') or author_info.get('author_name', 'Support Agent')
+            print(f"🔧 MAIN: Using standard ticket structure")
+        
+        # Method 2: Direct fields
+        elif isinstance(data, dict):
+            ticket_id = data.get('ticket_id') or data.get('id')
+            comment_body = data.get('body') or data.get('comment') or data.get('latest_comment') or data.get('value')
+            author_name = data.get('author_name') or data.get('author') or 'Support Agent'
+            print(f"🔧 MAIN: Using direct field structure")
+        
+        print(f"🔧 MAIN: Extracted ticket_id: {ticket_id}")
+        print(f"🔧 MAIN: Extracted author: {author_name}")
+        print(f"🔧 MAIN: Extracted comment: {comment_body[:100] if comment_body else 'None'}")
+        
+        # Validate we have the necessary data
+        if not comment_body:
+            print("❌ MAIN: No comment body found in webhook data")
+            return jsonify({
+                "status": "error", 
+                "message": "No comment text found in webhook data"
+            }), 400
+        
+        if not ticket_id:
+            print("⚠️ MAIN: No ticket ID found, using placeholder")
+            ticket_id = "Unknown"
+        
+        # Don't send if it's from a Discord user (to avoid loops)
+        if "discord-" in str(author_name).lower():
+            print("✅ MAIN: Ignoring comment from Discord user (prevent loop)")
+            return jsonify({
+                "status": "success", 
+                "message": "Ignored Discord user comment"
+            })
+        
+        print("✅ MAIN: All checks passed! Sending to Discord...")
+        
+        # Prepare Discord message
+        discord_message = {
+            "embeds": [{
+                "title": f"💬 Update on Ticket #{ticket_id}",
+                "description": f"**From {author_name}:**\n\n{comment_body}",
+                "color": 3447003,  # Blue color
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "footer": {
+                    "text": "Zendesk Support"
                 }
-                requests.post(CONFIG['DISCORD_WEBHOOK_URL'], json=discord_data)
+            }]
+        }
         
-        return jsonify({"status": "success"})
+        print(f"🔧 MAIN: Sending to Discord webhook...")
+        response = requests.post(
+            CONFIG['DISCORD_WEBHOOK_URL'], 
+            json=discord_message, 
+            timeout=30
+        )
         
+        print(f"🔧 MAIN: Discord API response: {response.status_code}")
+        
+        if response.status_code == 204:
+            print("✅ MAIN: Successfully sent to Discord!")
+            return jsonify({
+                "status": "success", 
+                "message": "Comment sent to Discord successfully"
+            })
+        else:
+            print(f"❌ MAIN: Discord API error: {response.status_code} - {response.text}")
+            return jsonify({
+                "status": "error", 
+                "message": f"Discord API returned {response.status_code}"
+            }), 500
+            
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    print(f"🌐 Starting server on port {port}...")
-    app.run(host='0.0.0.0', port=port, debug=False)
+        print(f"❌ MAIN: Unexpected error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error", 
+            "message": f"Server error: {str(e)}"
+        }), 500
 
 @app.route('/test-webhook', methods=['POST', 'GET'])
 def test_webhook():
-    """Simple test to see if webhooks reach the app"""
-    print("🎯 TEST WEBHOOK HIT!")
+    """Test endpoint to verify webhook connectivity"""
+    print("🎯 TEST WEBHOOK ENDPOINT HIT!")
     
     if request.method == 'GET':
-        return jsonify({"status": "ready", "message": "Test endpoint working"})
+        return jsonify({
+            "status": "ready", 
+            "message": "Test webhook endpoint is working",
+            "endpoint": "/test-webhook"
+        })
     
-    # Handle POST
-    print("📨 Test webhook received!")
-    print("📨 Headers:", dict(request.headers))
+    # Handle POST requests
+    print("📨 TEST: Webhook received via POST!")
+    print("📨 TEST: Headers:", dict(request.headers))
+    print("📨 TEST: Content-Type:", request.content_type)
     
     try:
-        data = request.get_json()
-        print("📨 Data received:", data)
-        return jsonify({"status": "success", "message": "Test webhook received"})
-    except:
-        raw_data = request.get_data()
-        print("📨 Raw data:", raw_data)
-        return jsonify({"status": "success", "message": "Raw data received"})
+        if request.is_json:
+            data = request.get_json()
+            print("📨 TEST: JSON data received:", json.dumps(data, indent=2))
+        else:
+            raw_data = request.get_data(as_text=True)
+            print("📨 TEST: Raw data received:", raw_data)
+            
+        return jsonify({
+            "status": "success", 
+            "message": "Test webhook received successfully",
+            "data_received": True
+        })
+    except Exception as e:
+        print("📨 TEST: Error:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
