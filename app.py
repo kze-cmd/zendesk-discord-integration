@@ -3,31 +3,31 @@ import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
 
-print("🚀 Starting Zendesk-Discord Integration with py command...")
-
-# Create Flask app
 app = Flask(__name__)
 
-# Configuration
+print("🚀 Zendesk-Discord Integration Starting...")
+
+# HARDCODED CONFIGURATION - REPLACE WITH YOUR ACTUAL VALUES
 CONFIG = {
-    'ZENDESK_SUBDOMAIN': os.environ.get('ZENDESK_SUBDOMAIN'),
-    'ZENDESK_EMAIL': os.environ.get('ZENDESK_EMAIL'),
-    'ZENDESK_API_TOKEN': os.environ.get('ZENDESK_API_TOKEN'),
-    'DISCORD_WEBHOOK_URL': os.environ.get('DISCORD_WEBHOOK_URL')
+    'ZENDESK_SUBDOMAIN': 'btccexchange',  # ← REPLACE THIS (just the subdomain, not full URL)
+    'ZENDESK_EMAIL': 'kevin.ezekiel@cloudsense.asia',      # ← REPLACE THIS
+    'ZENDESK_API_TOKEN': 'KwMUBq32vDbPgYUCIWv6hLBrAvElR7CTWjMlyejs',  # ← REPLACE THIS
+    'DISCORD_WEBHOOK_URL': 'https://discord.com/api/webhooks/1438723422627692634/EDOAb93cPQGQDYru5HWfNtYLpCrvWr-X4fVfn7niIgkvYQdE_3rjqt3q474mTPoJlFD-'   # ← REPLACE THIS
 }
 
 print("🔧 Configuration check:")
 for key, value in CONFIG.items():
-    if value:
+    if 'YOUR_ACTUAL' not in value:
         print(f"   {key}: ✅ SET")
     else:
-        print(f"   {key}: ❌ NOT SET")
+        print(f"   {key}: ❌ NEEDS TO BE UPDATED")
 
 @app.route('/')
 def home():
     return """
     <h1>🚀 Zendesk-Discord Integration</h1>
-    <p><strong>Status:</strong> ✅ Running on Railway (py command)</p>
+    <p><strong>Status:</strong> ✅ Running with hardcoded config</p>
+    <p><strong>Note:</strong> Update credentials in app.py file</p>
     <h3>Available Endpoints:</h3>
     <ul>
         <li><a href="/health">/health</a> - Health check</li>
@@ -42,7 +42,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "zendesk-discord",
-        "command": "py",
+        "config": "hardcoded",
         "timestamp": datetime.now().isoformat()
     })
 
@@ -51,9 +51,11 @@ def test():
     """Test configuration and connections"""
     results = {
         "app": "✅ Running",
-        "python_command": "py",
-        "zendesk_configured": bool(CONFIG['ZENDESK_API_TOKEN']),
-        "discord_configured": bool(CONFIG['DISCORD_WEBHOOK_URL'])
+        "config_source": "hardcoded",
+        "zendesk_configured": 'YOUR_ACTUAL' not in CONFIG['ZENDESK_API_TOKEN'],
+        "discord_configured": 'YOUR_ACTUAL' not in CONFIG['DISCORD_WEBHOOK_URL'],
+        "zendesk_subdomain": CONFIG['ZENDESK_SUBDOMAIN'],
+        "zendesk_email": CONFIG['ZENDESK_EMAIL'][:3] + "***" if CONFIG['ZENDESK_EMAIL'] else "Not set"
     }
     
     # Test Zendesk if configured
@@ -65,6 +67,7 @@ def test():
                 timeout=10
             )
             results['zendesk_connection'] = response.status_code == 200
+            results['zendesk_status'] = response.status_code
         except Exception as e:
             results['zendesk_connection'] = False
             results['zendesk_error'] = str(e)
@@ -76,10 +79,11 @@ def test():
         try:
             response = requests.post(
                 CONFIG['DISCORD_WEBHOOK_URL'],
-                json={"content": "🔧 Test from Railway deployment using py command"},
+                json={"content": "🔧 Test message from Railway deployment"},
                 timeout=10
             )
             results['discord_connection'] = response.status_code in [200, 204]
+            results['discord_status'] = response.status_code
         except Exception as e:
             results['discord_connection'] = False
             results['discord_error'] = str(e)
@@ -88,33 +92,17 @@ def test():
     
     return jsonify(results)
 
-@app.route('/create-ticket', methods=['GET', 'POST'])
+@app.route('/create-ticket', methods=['POST'])
 def create_ticket():
-    """Create ticket endpoint"""
-    if request.method == 'GET':
-        return """
-        <h2>Create Test Ticket</h2>
-        <p>Use POST method with JSON data. Example using curl:</p>
-        <pre>
-curl -X POST https://your-app.up.railway.app/create-ticket \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "subject": "Test Ticket",
-    "description": "Test description",
-    "user": "TestUser"
-  }'
-        </pre>
-        """
-    
-    # POST method
+    """Create a new Zendesk ticket"""
     try:
         data = request.get_json() or {}
         
-        # Validate Zendesk config
-        if not CONFIG['ZENDESK_API_TOKEN']:
+        # Check if Zendesk is configured
+        if 'YOUR_ACTUAL' in CONFIG['ZENDESK_API_TOKEN']:
             return jsonify({
                 "status": "error",
-                "message": "Zendesk not configured. Set ZENDESK_API_TOKEN environment variable."
+                "message": "Zendesk not configured. Update ZENDESK_API_TOKEN in app.py file"
             }), 500
         
         subject = data.get('subject', 'Support Request')
@@ -148,7 +136,7 @@ curl -X POST https://your-app.up.railway.app/create-ticket \\
             ticket_id = response.json()['ticket']['id']
             
             # Notify Discord if configured
-            if CONFIG['DISCORD_WEBHOOK_URL']:
+            if 'YOUR_ACTUAL' not in CONFIG['DISCORD_WEBHOOK_URL']:
                 discord_data = {
                     "embeds": [{
                         "title": "🎫 New Ticket Created",
@@ -168,7 +156,7 @@ curl -X POST https://your-app.up.railway.app/create-ticket \\
             return jsonify({
                 "status": "error",
                 "message": f"Zendesk API error: {response.status_code}",
-                "details": response.text[:200]
+                "details": response.text[:200] if response.text else 'No response body'
             }), 500
             
     except Exception as e:
@@ -183,7 +171,7 @@ def zendesk_webhook():
     try:
         data = request.get_json() or {}
         
-        if not CONFIG['DISCORD_WEBHOOK_URL']:
+        if 'YOUR_ACTUAL' in CONFIG['DISCORD_WEBHOOK_URL']:
             return jsonify({"status": "error", "message": "Discord not configured"}), 500
         
         ticket_id = data.get('ticket', {}).get('id')
@@ -211,4 +199,5 @@ def zendesk_webhook():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    print(f"🌐 Starting server on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
