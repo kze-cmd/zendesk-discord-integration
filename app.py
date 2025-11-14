@@ -201,3 +201,24 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Starting server on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
+
+@app.route('/test-webhook', methods=['POST', 'GET'])
+def test_webhook():
+    """Simple test to see if webhooks reach the app"""
+    print("🎯 TEST WEBHOOK HIT!")
+    
+    if request.method == 'GET':
+        return jsonify({"status": "ready", "message": "Test endpoint working"})
+    
+    # Handle POST
+    print("📨 Test webhook received!")
+    print("📨 Headers:", dict(request.headers))
+    
+    try:
+        data = request.get_json()
+        print("📨 Data received:", data)
+        return jsonify({"status": "success", "message": "Test webhook received"})
+    except:
+        raw_data = request.get_data()
+        print("📨 Raw data:", raw_data)
+        return jsonify({"status": "success", "message": "Raw data received"})
