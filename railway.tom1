@@ -5,7 +5,7 @@ builder = "nixpacks"
 startCommand = "python app.py"
 
 [variables]
-ZENDESK_SUBDOMAIN = "yourcompany"
-ZENDESK_EMAIL = "your_email@company.com"
-ZENDESK_API_TOKEN = "your_actual_zendesk_token"
-DISCORD_WEBHOOK_URL = "your_actual_discord_webhook_url"
+ZENDESK_SUBDOMAIN = "btccexchange"
+ZENDESK_EMAIL = "kevin.ezekiel@cloudsense.asia"
+ZENDESK_API_TOKEN = "KwMUBq32vDbPgYUCIWv6hLBrAvElR7CTWjMlyejs"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1438723422627692634/EDOAb93cPQGQDYru5HWfNtYLpCrvWr-X4fVfn7niIgkvYQdE_3rjqt3q474mTPoJlFD-"
