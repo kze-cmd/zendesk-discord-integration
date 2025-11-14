@@ -1,344 +1,310 @@
+"""
+Secure Flask app for forwarding Zendesk ticket comments to Discord.
+
+Features:
+- Uses environment variables for secrets (no hardcoding)
+- Optional Zendesk webhook HMAC verification (if ZENDESK_WEBHOOK_SECRET set)
+- Safe logging (truncates sensitive data)
+- Robust JSON parsing and validation
+- Accepts Discord 200/204 responses as success
+- Minimal leakage of PII in logs
+
+Usage:
+1. Set environment variables (example):
+   export ZENDESK_SUBDOMAIN=your_subdomain
+   export ZENDESK_EMAIL=you@example.com
+   export ZENDESK_API_TOKEN=xxxxx
+   export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+   export ZENDESK_WEBHOOK_SECRET=optional_shared_secret
+
+2. Run:
+   pip install flask requests python-dotenv
+   flask run
+
+This file intentionally avoids printing or storing secrets.
+"""
+
 import os
-import requests
-from flask import Flask, request, jsonify
+import json
+import hmac
+import hashlib
+import logging
 from datetime import datetime
+from typing import Optional
+
+import requests
+from flask import Flask, request, jsonify, abort
+
+# --- Configuration ---
+# Read critical values from environment variables
+ZENDESK_SUBDOMAIN = os.getenv('ZENDESK_SUBDOMAIN')
+ZENDESK_EMAIL = os.getenv('ZENDESK_EMAIL')
+ZENDESK_API_TOKEN = os.getenv('ZENDESK_API_TOKEN')
+DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
+ZENDESK_WEBHOOK_SECRET = os.getenv('ZENDESK_WEBHOOK_SECRET')  # optional
+
+# Quick safety check: ensure required values are present
+REQUIRED = {
+    'ZENDESK_SUBDOMAIN': ZENDESK_SUBDOMAIN,
+    'ZENDESK_EMAIL': ZENDESK_EMAIL,
+    'ZENDESK_API_TOKEN': ZENDESK_API_TOKEN,
+    'DISCORD_WEBHOOK_URL': DISCORD_WEBHOOK_URL,
+}
+
+missing = [k for k, v in REQUIRED.items() if not v]
+
+# --- Logging ---
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+logging.basicConfig(level=LOG_LEVEL)
+logger = logging.getLogger('zendesk-discord')
+
+if missing:
+    logger.warning('Missing environment variables: %s', ', '.join(missing))
 
 app = Flask(__name__)
 
-print("🚀 Zendesk-Discord Integration Starting...")
+# --- Utilities ---
 
-# HARDCODED CONFIGURATION - REPLACE WITH YOUR ACTUAL VALUES
-CONFIG = {
-    'ZENDESK_SUBDOMAIN': 'btccexchange',  # ← REPLACE THIS (just the subdomain, not full URL)
-    'ZENDESK_EMAIL': 'kevin.ezekiel@cloudsense.asia',      # ← REPLACE THIS
-    'ZENDESK_API_TOKEN': 'KwMUBq32vDbPgYUCIWv6hLBrAvElR7CTWjMlyejs',  # ← REPLACE THIS
-    'DISCORD_WEBHOOK_URL': 'https://discord.com/api/webhooks/1438723422627692634/EDOAb93cPQGQDYru5HWfNtYLpCrvWr-X4fVfn7niIgkvYQdE_3rjqt3q474mTPoJlFD-'   # ← REPLACE THIS
-}
+def truncate(s: Optional[str], length: int = 200) -> str:
+    if s is None:
+        return ''
+    s = str(s)
+    return (s[:length] + '...') if len(s) > length else s
 
-print("🔧 Configuration check:")
-for key, value in CONFIG.items():
-    if 'YOUR_ACTUAL' not in value:
-        print(f"   {key}: ✅ SET")
-    else:
-        print(f"   {key}: ❌ NEEDS TO BE UPDATED")
+
+def verify_zendesk_signature(payload_body: bytes, signature_header: str, secret: str) -> bool:
+    """Verify Zendesk webhook signature (if provided). Zendesk uses HMAC-SHA256.
+    The header may look like: "sha256=..."
+    """
+    if not signature_header or not secret:
+        return False
+
+    try:
+        if signature_header.startswith('sha256='):
+            signature = signature_header.split('=', 1)[1]
+        else:
+            signature = signature_header
+
+        mac = hmac.new(secret.encode('utf-8'), msg=payload_body, digestmod=hashlib.sha256)
+        computed = mac.hexdigest()
+        # Use hmac.compare_digest to avoid timing attacks
+        return hmac.compare_digest(computed, signature)
+    except Exception:
+        return False
+
+
+def is_discord_success(status_code: int) -> bool:
+    return status_code in (200, 204)
+
+
+def safe_post_discord(payload: dict, timeout: int = 15) -> requests.Response:
+    """Post to Discord webhook and return response. Exceptions bubble up to caller."""
+    headers = {'Content-Type': 'application/json'}
+    return requests.post(DISCORD_WEBHOOK_URL, json=payload, headers=headers, timeout=timeout)
+
+
+# --- Routes ---
 
 @app.route('/')
 def home():
-    return """
-    <h1>🚀 Zendesk-Discord Integration</h1>
-    <p><strong>Status:</strong> ✅ Running with hardcoded config</p>
-    <p><strong>Note:</strong> Update credentials in app.py file</p>
-    <h3>Available Endpoints:</h3>
-    <ul>
-        <li><a href="/health">/health</a> - Health check</li>
-        <li><a href="/test">/test</a> - Test connections</li>
-        <li>POST <a href="/create-ticket">/create-ticket</a> - Create ticket</li>
-        <li>POST /zendesk-webhook - Zendesk webhook</li>
-    </ul>
-    """
+    status = {
+        'service': 'zendesk-discord-forwarder',
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'configured': not bool(missing),
+    }
+    return jsonify(status)
+
 
 @app.route('/health')
 def health():
     return jsonify({
-        "status": "healthy",
-        "service": "zendesk-discord",
-        "config": "hardcoded",
-        "timestamp": datetime.now().isoformat()
+        'status': 'healthy',
+        'configured': not bool(missing),
+        'timestamp': datetime.utcnow().isoformat() + 'Z'
     })
+
 
 @app.route('/test')
 def test():
-    """Test configuration and connections"""
-    results = {
-        "app": "✅ Running",
-        "config_source": "hardcoded",
-        "zendesk_configured": 'YOUR_ACTUAL' not in CONFIG['ZENDESK_API_TOKEN'],
-        "discord_configured": 'YOUR_ACTUAL' not in CONFIG['DISCORD_WEBHOOK_URL'],
-        "zendesk_subdomain": CONFIG['ZENDESK_SUBDOMAIN'],
-        "zendesk_email": CONFIG['ZENDESK_EMAIL'][:3] + "***" if CONFIG['ZENDESK_EMAIL'] else "Not set"
-    }
-    
-    # Test Zendesk if configured
-    if results['zendesk_configured']:
-        try:
-            response = requests.get(
-                f"https://{CONFIG['ZENDESK_SUBDOMAIN']}.zendesk.com/api/v2/tickets.json?per_page=1",
-                auth=(f"{CONFIG['ZENDESK_EMAIL']}/token", CONFIG['ZENDESK_API_TOKEN']),
-                timeout=10
-            )
-            results['zendesk_connection'] = response.status_code == 200
-            results['zendesk_status'] = response.status_code
-        except Exception as e:
-            results['zendesk_connection'] = False
-            results['zendesk_error'] = str(e)
-    else:
-        results['zendesk_connection'] = "Not configured"
-    
-    # Test Discord if configured
-    if results['discord_configured']:
-        try:
-            response = requests.post(
-                CONFIG['DISCORD_WEBHOOK_URL'],
-                json={"content": "🔧 Test message from Railway deployment"},
-                timeout=10
-            )
-            results['discord_connection'] = response.status_code in [200, 204]
-            results['discord_status'] = response.status_code
-        except Exception as e:
-            results['discord_connection'] = False
-            results['discord_error'] = str(e)
-    else:
-        results['discord_connection'] = "Not configured"
-    
+    """Lightweight connectivity tests for configured services. Does not log secrets."""
+    if missing:
+        return jsonify({'status': 'error', 'message': 'Missing environment variables', 'missing': missing}), 400
+
+    results = {'app': 'running', 'timestamp': datetime.utcnow().isoformat() + 'Z'}
+
+    # Zendesk test - small, safe GET for 1 ticket (doesn't expose token in logs)
+    try:
+        url = f'https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets.json?per_page=1'
+        resp = requests.get(url, auth=(f'{ZENDESK_EMAIL}/token', ZENDESK_API_TOKEN), timeout=10)
+        results['zendesk'] = {'status_code': resp.status_code, 'ok': resp.status_code == 200}
+    except Exception as e:
+        logger.exception('Zendesk connectivity test failed')
+        results['zendesk'] = {'ok': False, 'error': str(e)}
+
+    # Discord test - send a safe minimal message
+    try:
+        payload = {'content': '🔧 Test message (no sensitive data)'}
+        resp = safe_post_discord(payload)
+        results['discord'] = {'status_code': getattr(resp, 'status_code', None), 'ok': is_discord_success(getattr(resp, 'status_code', 0))}
+    except Exception as e:
+        logger.exception('Discord connectivity test failed')
+        results['discord'] = {'ok': False, 'error': str(e)}
+
     return jsonify(results)
+
 
 @app.route('/create-ticket', methods=['POST'])
 def create_ticket():
-    """Create a new Zendesk ticket"""
+    """Create a Zendesk ticket from provided JSON. Expects subject, description, user(optional)."""
+    if missing:
+        return jsonify({'status': 'error', 'message': 'Service not fully configured', 'missing': missing}), 400
+
     try:
-        data = request.get_json() or {}
-        
-        # Check if Zendesk is configured
-        if 'YOUR_ACTUAL' in CONFIG['ZENDESK_API_TOKEN']:
-            return jsonify({
-                "status": "error",
-                "message": "Zendesk not configured. Update ZENDESK_API_TOKEN in app.py file"
-            }), 500
-        
+        data = request.get_json(silent=True) or {}
         subject = data.get('subject', 'Support Request')
         description = data.get('description', 'No description provided')
-        user = data.get('user', 'Discord User')
-        
-        # Create Zendesk ticket
+        user = data.get('user', 'discord-user')
+
+        requester_email = f'discord-{user}@example.com'
+
         ticket_data = {
-            "ticket": {
-                "subject": f"Discord: {subject}",
-                "comment": {
-                    "body": f"From: {user}\n\n{description}",
-                    "public": True
-                },
-                "requester": {
-                    "name": user,
-                    "email": f"discord-{user}@company.com"
-                },
-                "tags": ["discord", "railway"]
+            'ticket': {
+                'subject': f'Discord: {truncate(subject, 120)}',
+                'comment': {'body': truncate(description, 4000), 'public': True},
+                'requester': {'name': truncate(user, 120), 'email': requester_email},
+                'tags': ['discord']
             }
         }
-        
-        response = requests.post(
-            f"https://{CONFIG['ZENDESK_SUBDOMAIN']}.zendesk.com/api/v2/tickets.json",
-            json=ticket_data,
-            auth=(f"{CONFIG['ZENDESK_EMAIL']}/token", CONFIG['ZENDESK_API_TOKEN']),
-            timeout=30
-        )
-        
-        if response.status_code == 201:
-            ticket_id = response.json()['ticket']['id']
-            
-            # Notify Discord if configured
-            if 'YOUR_ACTUAL' not in CONFIG['DISCORD_WEBHOOK_URL']:
-                discord_data = {
-                    "embeds": [{
-                        "title": "🎫 New Ticket Created",
-                        "description": f"**Ticket #{ticket_id}**\n**User:** {user}\n**Subject:** {subject}",
-                        "color": 3066993,
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
+
+        url = f'https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets.json'
+        resp = requests.post(url, json=ticket_data, auth=(f'{ZENDESK_EMAIL}/token', ZENDESK_API_TOKEN), timeout=30)
+
+        if resp.status_code == 201:
+            ticket_id = resp.json().get('ticket', {}).get('id')
+            # Notify Discord
+            try:
+                embed = {
+                    'embeds': [{
+                        'title': '🎫 New Ticket Created',
+                        'description': f'**Ticket #{ticket_id}**\n**User:** {truncate(user, 80)}\n**Subject:** {truncate(subject, 200)}',
+                        'timestamp': datetime.utcnow().isoformat() + 'Z'
                     }]
                 }
-                requests.post(CONFIG['DISCORD_WEBHOOK_URL'], json=discord_data)
-            
-            return jsonify({
-                "status": "success",
-                "ticket_id": ticket_id,
-                "message": "Ticket created successfully"
-            })
-        else:
-            return jsonify({
-                "status": "error",
-                "message": f"Zendesk API error: {response.status_code}",
-                "details": response.text[:200] if response.text else 'No response body'
-            }), 500
-            
+                discord_resp = safe_post_discord(embed)
+                if not is_discord_success(discord_resp.status_code):
+                    logger.warning('Discord webhook returned non-success for ticket notification: %s', discord_resp.status_code)
+            except Exception:
+                logger.exception('Failed to notify Discord about created ticket')
+
+            return jsonify({'status': 'success', 'ticket_id': ticket_id}), 201
+
+        logger.warning('Zendesk API returned non-201 when creating ticket: %s', resp.status_code)
+        return jsonify({'status': 'error', 'message': 'Zendesk API error', 'status_code': resp.status_code}), 500
+
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        logger.exception('Unexpected error in create_ticket')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 @app.route('/zendesk-webhook', methods=['POST', 'GET'])
 def zendesk_webhook():
-    """Zendesk webhook endpoint with full debugging"""
-    print("=" * 60)
-    print("🎯 MAIN ZENDESK WEBHOOK ENDPOINT HIT!")
-    print("=" * 60)
-    
+    """Endpoint to receive Zendesk webhook events and forward comments to Discord.
+
+    If ZENDESK_WEBHOOK_SECRET is set, verify the X-Zendesk-Webhook-Signature header.
+    """
     if request.method == 'GET':
-        return jsonify({
-            "status": "ready",
-            "message": "Zendesk webhook endpoint is active",
-            "endpoint": "/zendesk-webhook"
-        })
-    
-    # Handle POST requests
-    print("📨 MAIN: Webhook received via POST!")
-    print("📨 MAIN: Headers:", dict(request.headers))
-    print("📨 MAIN: Content-Type:", request.content_type)
-    print("📨 MAIN: Method:", request.method)
-    
+        return jsonify({'status': 'ready', 'message': 'zendesk webhook endpoint active'})
+
+    # Only accept JSON-like payloads. Keep raw body for signature verification.
+    payload_body = request.get_data()  # bytes
+
+    # Verify signature if secret provided
+    signature_header = request.headers.get('X-Zendesk-Webhook-Signature') or request.headers.get('X-Zendesk-Signature')
+    if ZENDESK_WEBHOOK_SECRET:
+        ok = verify_zendesk_signature(payload_body, signature_header or '', ZENDESK_WEBHOOK_SECRET)
+        if not ok:
+            logger.warning('Zendesk webhook signature verification failed. Header present: %s', bool(signature_header))
+            return jsonify({'status': 'error', 'message': 'signature verification failed'}), 401
+
+    # Parse JSON safely
+    data = None
     try:
-        # Try to get JSON data
         if request.is_json:
-            data = request.get_json()
-            print("📨 MAIN: JSON data received:")
-            print(json.dumps(data, indent=2))
+            data = request.get_json(silent=True)
         else:
-            # Try to force JSON parsing
-            try:
-                data = request.get_json(force=True, silent=True)
-                if data:
-                    print("📨 MAIN: Forced JSON parsing worked:")
-                    print(json.dumps(data, indent=2))
-                else:
-                    raw_data = request.get_data(as_text=True)
-                    print("📨 MAIN: Raw data (not JSON):", raw_data)
-                    data = {"raw_data": raw_data}
-            except Exception as e:
-                raw_data = request.get_data(as_text=True)
-                print("📨 MAIN: Raw data (parse error):", raw_data)
-                data = {"raw_data": raw_data, "error": str(e)}
-        
-        # Check Discord configuration
-        if 'YOUR_ACTUAL' in CONFIG['DISCORD_WEBHOOK_URL']:
-            print("❌ MAIN: Discord webhook not configured in app.py")
-            return jsonify({
-                "status": "error", 
-                "message": "Discord webhook URL not configured. Update CONFIG in app.py"
-            }), 500
-        
-        print("🔧 MAIN: Discord webhook is configured")
-        
-        # Try to extract ticket and comment data
-        ticket_id = None
-        comment_body = None
-        author_name = "Support Agent"
-        
-        # Method 1: Standard Zendesk structure
+            # best-effort: try to parse
+            data = json.loads(payload_body.decode('utf-8')) if payload_body else {}
+    except Exception:
+        logger.exception('Failed to parse webhook payload as JSON')
+        return jsonify({'status': 'error', 'message': 'invalid json payload'}), 400
+
+    # Extract comment and author robustly while avoiding KeyErrors
+    ticket_id = None
+    comment_body = None
+    author_name = 'Support Agent'
+
+    try:
         if isinstance(data, dict) and 'ticket' in data:
-            ticket = data['ticket']
+            ticket = data.get('ticket') or {}
             ticket_id = ticket.get('id')
-            comment = ticket.get('comment', {})
+            comment = ticket.get('comment') or {}
             comment_body = comment.get('body') or comment.get('value')
-            author_info = comment.get('author', {})
-            author_name = author_info.get('name') or author_info.get('author_name', 'Support Agent')
-            print(f"🔧 MAIN: Using standard ticket structure")
-        
-        # Method 2: Direct fields
+            author_info = comment.get('author') or {}
+            author_name = author_info.get('name') or author_info.get('author_name') or author_name
         elif isinstance(data, dict):
             ticket_id = data.get('ticket_id') or data.get('id')
             comment_body = data.get('body') or data.get('comment') or data.get('latest_comment') or data.get('value')
-            author_name = data.get('author_name') or data.get('author') or 'Support Agent'
-            print(f"🔧 MAIN: Using direct field structure")
-        
-        print(f"🔧 MAIN: Extracted ticket_id: {ticket_id}")
-        print(f"🔧 MAIN: Extracted author: {author_name}")
-        print(f"🔧 MAIN: Extracted comment: {comment_body[:100] if comment_body else 'None'}")
-        
-        # Validate we have the necessary data
-        if not comment_body:
-            print("❌ MAIN: No comment body found in webhook data")
-            return jsonify({
-                "status": "error", 
-                "message": "No comment text found in webhook data"
-            }), 400
-        
-        if not ticket_id:
-            print("⚠️ MAIN: No ticket ID found, using placeholder")
-            ticket_id = "Unknown"
-        
-        # Don't send if it's from a Discord user (to avoid loops)
-        if "discord-" in str(author_name).lower():
-            print("✅ MAIN: Ignoring comment from Discord user (prevent loop)")
-            return jsonify({
-                "status": "success", 
-                "message": "Ignored Discord user comment"
-            })
-        
-        print("✅ MAIN: All checks passed! Sending to Discord...")
-        
-        # Prepare Discord message
-        discord_message = {
-            "embeds": [{
-                "title": f"💬 Update on Ticket #{ticket_id}",
-                "description": f"**From {author_name}:**\n\n{comment_body}",
-                "color": 3447003,  # Blue color
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "footer": {
-                    "text": "Zendesk Support"
-                }
-            }]
-        }
-        
-        print(f"🔧 MAIN: Sending to Discord webhook...")
-        response = requests.post(
-            CONFIG['DISCORD_WEBHOOK_URL'], 
-            json=discord_message, 
-            timeout=30
-        )
-        
-        print(f"🔧 MAIN: Discord API response: {response.status_code}")
-        
-        if response.status_code == 204:
-            print("✅ MAIN: Successfully sent to Discord!")
-            return jsonify({
-                "status": "success", 
-                "message": "Comment sent to Discord successfully"
-            })
+            author_name = data.get('author_name') or data.get('author') or author_name
+    except Exception:
+        logger.exception('Error while extracting fields from webhook payload')
+
+    if not comment_body:
+        logger.info('No comment body found in webhook payload (ticket: %s). Ignoring.', truncate(ticket_id, 40))
+        return jsonify({'status': 'ignored', 'message': 'no comment body'}), 200
+
+    # Prevent loops: ignore comments that appear to originate from Discord sender pattern
+    if isinstance(author_name, str) and 'discord-' in author_name.lower():
+        logger.info('Ignoring comment from Discord-origin author: %s', truncate(author_name, 80))
+        return jsonify({'status': 'ignored', 'message': 'discord-origin comment'}), 200
+
+    # Prepare Discord payload
+    discord_payload = {
+        'embeds': [{
+            'title': f'💬 Update on Ticket #{ticket_id or "Unknown"}',
+            'description': f'**From {truncate(author_name, 80)}:**\n\n{truncate(comment_body, 2000)}',
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'footer': {'text': 'Zendesk'}
+        }]
+    }
+
+    try:
+        resp = safe_post_discord(discord_payload)
+        if is_discord_success(resp.status_code):
+            logger.info('Forwarded Zendesk comment to Discord (ticket=%s).', truncate(ticket_id, 40))
+            return jsonify({'status': 'success', 'message': 'forwarded to discord'}), 200
         else:
-            print(f"❌ MAIN: Discord API error: {response.status_code} - {response.text}")
-            return jsonify({
-                "status": "error", 
-                "message": f"Discord API returned {response.status_code}"
-            }), 500
-            
-    except Exception as e:
-        print(f"❌ MAIN: Unexpected error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            "status": "error", 
-            "message": f"Server error: {str(e)}"
-        }), 500
+            logger.warning('Discord webhook returned error status: %s; body=%s', resp.status_code, truncate(resp.text, 500))
+            return jsonify({'status': 'error', 'message': 'discord webhook error', 'status_code': resp.status_code}), 502
+    except Exception:
+        logger.exception('Failed to send message to Discord')
+        return jsonify({'status': 'error', 'message': 'failed to post to discord'}), 500
+
 
 @app.route('/test-webhook', methods=['POST', 'GET'])
 def test_webhook():
-    """Test endpoint to verify webhook connectivity"""
-    print("🎯 TEST WEBHOOK ENDPOINT HIT!")
-    
     if request.method == 'GET':
-        return jsonify({
-            "status": "ready", 
-            "message": "Test webhook endpoint is working",
-            "endpoint": "/test-webhook"
-        })
-    
-    # Handle POST requests
-    print("📨 TEST: Webhook received via POST!")
-    print("📨 TEST: Headers:", dict(request.headers))
-    print("📨 TEST: Content-Type:", request.content_type)
-    
+        return jsonify({'status': 'ready', 'message': 'test webhook endpoint active'})
+
     try:
-        if request.is_json:
-            data = request.get_json()
-            print("📨 TEST: JSON data received:", json.dumps(data, indent=2))
-        else:
-            raw_data = request.get_data(as_text=True)
-            print("📨 TEST: Raw data received:", raw_data)
-            
-        return jsonify({
-            "status": "success", 
-            "message": "Test webhook received successfully",
-            "data_received": True
-        })
+        payload_body = request.get_data(as_text=True)
+        logger.info('Test webhook received (truncated): %s', truncate(payload_body, 500))
+        return jsonify({'status': 'success', 'message': 'received', 'truncated_body': truncate(payload_body, 200)}), 200
     except Exception as e:
-        print("📨 TEST: Error:", str(e))
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.exception('Error in test_webhook')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+if __name__ == '__main__':
+    # When running locally for development, ensure debug is off by default unless explicitly enabled
+    debug_mode = os.getenv('FLASK_DEBUG', '0') == '1'
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=debug_mode)
